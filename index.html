@@ -159,6 +159,10 @@ body{
       <input type="file" id="file_input" accept=".xlsx,.xls">
     </div>
     <div id="mapping_wrap" class="mapping-wrap" style="display:none;">
+      <label style="display:flex;flex-direction:column;font-size:13px;color:#333;gap:4px;margin-bottom:14px;">
+        項目名（見出し）が入っている行
+        <select id="header_row_select"></select>
+      </label>
       <p class="note">列の対応付け（自動で推測していますが、違っていれば選び直してください）</p>
       <div class="form-grid">
         <label>寄付者名の列
@@ -476,6 +480,7 @@ function guessColumn(headers, ...candidates){
 
 let rawExcelRows = [];
 let excelHeaders = [];
+let currentWorksheet = null;
 
 const MAP_FIELDS = [
   { id: 'map_name', candidates: ['寄付者名', '氏名', '寄付者'] },
@@ -485,32 +490,68 @@ const MAP_FIELDS = [
   { id: 'map_amount', candidates: ['寄付金額', '金額'] }
 ];
 
+/* 見出し（項目名）が入っている行を自動推測：空欄でないセルが一番多い行を採用 */
+function guessHeaderRowIndex(aoa){
+  const scanCount = Math.min(aoa.length, 15);
+  let bestIdx = 0, bestScore = -1;
+  for(let i = 0; i < scanCount; i++){
+    const row = aoa[i] || [];
+    const score = row.filter(c => String(c).trim() !== '').length;
+    if(score > bestScore){ bestScore = score; bestIdx = i; }
+  }
+  return bestIdx;
+}
+
+function refreshMappingSelects(){
+  MAP_FIELDS.forEach(field => {
+    const select = document.getElementById(field.id);
+    const guessed = guessColumn(excelHeaders, ...field.candidates);
+    select.innerHTML = '<option value="">-- 選択してください --</option>' +
+      excelHeaders.map(h => `<option value="${h.replace(/"/g,'&quot;')}"${h === guessed ? ' selected' : ''}>${h}</option>`).join('');
+  });
+}
+
+/* 指定した行番号（0始まり）を見出し行としてデータを組み直す */
+function applyHeaderRowIndex(idx){
+  rawExcelRows = XLSX.utils.sheet_to_json(currentWorksheet, { range: idx, defval: '' });
+  excelHeaders = rawExcelRows.length > 0 ? Object.keys(rawExcelRows[0]) : [];
+  refreshMappingSelects();
+  document.getElementById('mapping_wrap').style.display = excelHeaders.length > 0 ? 'block' : 'none';
+  document.getElementById('bulk_table_wrap').innerHTML = '';
+  document.getElementById('btn_pdf_bulk').disabled = true;
+  bulkRows = [];
+  document.getElementById('bulk_status').textContent = excelHeaders.length > 0
+    ? '列の対応付けを確認し、「この対応付けで読み込む」を押してください。'
+    : 'この行には項目名が見つかりませんでした。「項目名が入っている行」を選び直してください。';
+}
+
 document.getElementById('file_input').addEventListener('change', (e) => {
   const file = e.target.files[0];
   if(!file) return;
   const reader = new FileReader();
   reader.onload = (evt) => {
     const wb = XLSX.read(evt.target.result, { type: 'array', cellDates: false });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    rawExcelRows = XLSX.utils.sheet_to_json(ws, { defval: '' });
-    excelHeaders = rawExcelRows.length > 0 ? Object.keys(rawExcelRows[0]) : [];
+    currentWorksheet = wb.Sheets[wb.SheetNames[0]];
 
-    MAP_FIELDS.forEach(field => {
-      const select = document.getElementById(field.id);
-      const guessed = guessColumn(excelHeaders, ...field.candidates);
-      select.innerHTML = '<option value="">-- 選択してください --</option>' +
-        excelHeaders.map(h => `<option value="${h.replace(/"/g,'&quot;')}"${h === guessed ? ' selected' : ''}>${h}</option>`).join('');
-    });
+    const aoa = XLSX.utils.sheet_to_json(currentWorksheet, { header: 1, defval: '' });
+    const guessedRow = guessHeaderRowIndex(aoa);
 
-    document.getElementById('mapping_wrap').style.display = excelHeaders.length > 0 ? 'block' : 'none';
-    document.getElementById('bulk_table_wrap').innerHTML = '';
-    document.getElementById('btn_pdf_bulk').disabled = true;
-    bulkRows = [];
-    document.getElementById('bulk_status').textContent = excelHeaders.length > 0
-      ? '列の対応付けを確認し、「この対応付けで読み込む」を押してください。'
-      : '列を読み取れませんでした。ファイルを確認してください。';
+    const rowSelect = document.getElementById('header_row_select');
+    const previewCount = Math.min(aoa.length, 15);
+    let options = '';
+    for(let i = 0; i < previewCount; i++){
+      const preview = (aoa[i] || []).filter(c => String(c).trim() !== '').slice(0, 5).join('、');
+      options += `<option value="${i}"${i === guessedRow ? ' selected' : ''}>行${i + 1}：${preview.slice(0, 40) || '(空の行)'}</option>`;
+    }
+    rowSelect.innerHTML = options;
+
+    applyHeaderRowIndex(guessedRow);
   };
   reader.readAsArrayBuffer(file);
+});
+
+document.getElementById('header_row_select').addEventListener('change', (e) => {
+  applyHeaderRowIndex(Number(e.target.value));
 });
 
 document.getElementById('btn_apply_mapping').addEventListener('click', () => {
