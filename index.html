@@ -49,6 +49,10 @@ body{
 .btn:disabled{opacity:.4;cursor:not-allowed;}
 .bulk-help{font-size:13px;color:#333;margin-bottom:14px;}
 .bulk-help code{background:#eee;padding:2px 6px;border-radius:4px;font-size:12px;}
+.mapping-wrap{background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px;margin:14px 0;}
+.mapping-wrap select{
+  padding:9px 10px;border:1px solid #ccc;border-radius:6px;font-size:14px;font-family:inherit;
+}
 .upload-box{margin:12px 0;}
 #bulk_table_wrap table{border-collapse:collapse;width:100%;font-size:12px;margin-top:10px;}
 #bulk_table_wrap th,#bulk_table_wrap td{border:1px solid #ddd;padding:6px 8px;text-align:left;}
@@ -148,11 +152,34 @@ body{
   <section id="tab-bulk" class="tab-panel">
     <div class="bulk-help">
       <p>Salesforceから出力したエクセルファイル（.xlsx）を読み込んで、一括でPDFを発行します。</p>
-      <p>必要な列見出し：<code>寄付者名, 寄付者住所, 事業名, 寄付日, 寄付金額</code></p>
+      <p>アップロード後に、エクセルの列とアプリの項目の対応付けを確認できます。列名が違っていても大丈夫です。</p>
       <button class="btn" id="btn_template">Excelテンプレートをダウンロード</button>
     </div>
     <div class="upload-box">
       <input type="file" id="file_input" accept=".xlsx,.xls">
+    </div>
+    <div id="mapping_wrap" class="mapping-wrap" style="display:none;">
+      <p class="note">列の対応付け（自動で推測していますが、違っていれば選び直してください）</p>
+      <div class="form-grid">
+        <label>寄付者名の列
+          <select id="map_name"></select>
+        </label>
+        <label>寄付者住所の列
+          <select id="map_addr"></select>
+        </label>
+        <label>事業名の列
+          <select id="map_project"></select>
+        </label>
+        <label>寄付日の列
+          <select id="map_date"></select>
+        </label>
+        <label>寄付金額の列
+          <select id="map_amount"></select>
+        </label>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="btn_apply_mapping">この対応付けで読み込む</button>
+      </div>
     </div>
     <div id="bulk_table_wrap"></div>
     <div class="actions">
@@ -435,17 +462,28 @@ function excelDateToISO(val){
   return s;
 }
 
-/* 列見出しのゆらぎ（前後の空白・全角/半角スペースなど）を吸収して値を取得 */
-function getCol(row, ...names){
-  const normalize = (s) => String(s).replace(/[\s　]/g, '');
-  const keys = Object.keys(row);
-  for(const name of names){
-    if(row[name] !== undefined && row[name] !== '') return row[name];
-    const found = keys.find(k => normalize(k) === normalize(name));
-    if(found !== undefined && row[found] !== '') return row[found];
+/* 列見出しのゆらぎ（前後の空白・全角/半角スペースなど）を吸収して一致度を判定 */
+function normalizeHeader(s){
+  return String(s).replace(/[\s　]/g, '');
+}
+function guessColumn(headers, ...candidates){
+  for(const c of candidates){
+    const found = headers.find(h => normalizeHeader(h) === normalizeHeader(c));
+    if(found !== undefined) return found;
   }
   return '';
 }
+
+let rawExcelRows = [];
+let excelHeaders = [];
+
+const MAP_FIELDS = [
+  { id: 'map_name', candidates: ['寄付者名', '氏名', '寄付者'] },
+  { id: 'map_addr', candidates: ['寄付者住所', '住所'] },
+  { id: 'map_project', candidates: ['事業名', 'プロジェクト名', '案件名'] },
+  { id: 'map_date', candidates: ['寄付日', '領収日', '受領日'] },
+  { id: 'map_amount', candidates: ['寄付金額', '金額'] }
+];
 
 document.getElementById('file_input').addEventListener('change', (e) => {
   const file = e.target.files[0];
@@ -454,20 +492,51 @@ document.getElementById('file_input').addEventListener('change', (e) => {
   reader.onload = (evt) => {
     const wb = XLSX.read(evt.target.result, { type: 'array', cellDates: false });
     const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
-    bulkRows = rows.map(r => ({
-      name: String(getCol(r, '寄付者名') || '').trim(),
-      addr: String(getCol(r, '寄付者住所') || '').trim(),
-      project: String(getCol(r, '事業名') || '').trim(),
-      date: excelDateToISO(getCol(r, '寄付日', '領収日')),
-      amount: getCol(r, '寄付金額') || 0
-    }));
-    renderBulkTable();
-    document.getElementById('btn_pdf_bulk').disabled = bulkRows.length === 0;
-    document.getElementById('bulk_status').textContent = bulkRows.length + ' 件読み込みました。プレビューは1件目の内容です。';
-    if(bulkRows.length > 0) fillCertificate(bulkRows[0]);
+    rawExcelRows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    excelHeaders = rawExcelRows.length > 0 ? Object.keys(rawExcelRows[0]) : [];
+
+    MAP_FIELDS.forEach(field => {
+      const select = document.getElementById(field.id);
+      const guessed = guessColumn(excelHeaders, ...field.candidates);
+      select.innerHTML = '<option value="">-- 選択してください --</option>' +
+        excelHeaders.map(h => `<option value="${h.replace(/"/g,'&quot;')}"${h === guessed ? ' selected' : ''}>${h}</option>`).join('');
+    });
+
+    document.getElementById('mapping_wrap').style.display = excelHeaders.length > 0 ? 'block' : 'none';
+    document.getElementById('bulk_table_wrap').innerHTML = '';
+    document.getElementById('btn_pdf_bulk').disabled = true;
+    bulkRows = [];
+    document.getElementById('bulk_status').textContent = excelHeaders.length > 0
+      ? '列の対応付けを確認し、「この対応付けで読み込む」を押してください。'
+      : '列を読み取れませんでした。ファイルを確認してください。';
   };
   reader.readAsArrayBuffer(file);
+});
+
+document.getElementById('btn_apply_mapping').addEventListener('click', () => {
+  const colName = document.getElementById('map_name').value;
+  const colAddr = document.getElementById('map_addr').value;
+  const colProject = document.getElementById('map_project').value;
+  const colDate = document.getElementById('map_date').value;
+  const colAmount = document.getElementById('map_amount').value;
+
+  if(!colName || !colDate || !colAmount){
+    alert('寄付者名・寄付日・寄付金額は必ず列を選択してください。');
+    return;
+  }
+
+  bulkRows = rawExcelRows.map(r => ({
+    name: String(r[colName] ?? '').trim(),
+    addr: colAddr ? String(r[colAddr] ?? '').trim() : '',
+    project: colProject ? String(r[colProject] ?? '').trim() : '',
+    date: excelDateToISO(r[colDate]),
+    amount: r[colAmount] || 0
+  }));
+
+  renderBulkTable();
+  document.getElementById('btn_pdf_bulk').disabled = bulkRows.length === 0;
+  document.getElementById('bulk_status').textContent = bulkRows.length + ' 件読み込みました。プレビューは1件目の内容です。';
+  if(bulkRows.length > 0) fillCertificate(bulkRows[0]);
 });
 
 function renderBulkTable(){
