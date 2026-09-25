@@ -597,6 +597,8 @@ document.getElementById('btn_apply_mapping').addEventListener('click', () => {
     return;
   }
 
+  const skippedRows = [];
+
   bulkRows = rawExcelRows.map(r => {
     const personalName = colPersonalName ? String(r[colPersonalName] ?? '').trim() : '';
     const orgName = colOrgName ? String(r[colOrgName] ?? '').trim() : '';
@@ -609,11 +611,17 @@ document.getElementById('btn_apply_mapping').addEventListener('click', () => {
       date: excelDateToISO(r[colDate]),
       amount: parseAmountValue(r[colAmount])
     };
+  }).filter(r => {
+    // 「合計」「社外秘情報」「Copyright」など、寄付者名が入っていない行は
+    // レポートの集計・注記行とみなして除外する
+    if(r.name === ''){ skippedRows.push(r); return false; }
+    return true;
   });
 
   renderBulkTable();
   document.getElementById('btn_pdf_bulk').disabled = bulkRows.length === 0;
-  document.getElementById('bulk_status').textContent = bulkRows.length + ' 件読み込みました。プレビューは1件目の内容です。';
+  document.getElementById('bulk_status').textContent = bulkRows.length + ' 件読み込みました。プレビューは1件目の内容です。'
+    + (skippedRows.length > 0 ? `（寄付者名が空欄の行を${skippedRows.length}件、集計・注記行として除外しました）` : '');
   if(bulkRows.length > 0) fillCertificate(bulkRows[0]);
 });
 
