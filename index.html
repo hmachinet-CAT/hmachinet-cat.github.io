@@ -134,7 +134,7 @@ body{
         <input type="text" id="s_project" placeholder="例）聖徳まつり2026" list="project_history" autocomplete="off">
         <datalist id="project_history"></datalist>
       </label>
-      <label>寄付日（領収日）
+      <label>入金日
         <input type="date" id="s_date">
       </label>
       <label>寄付金額（円）
@@ -164,17 +164,24 @@ body{
         <select id="header_row_select"></select>
       </label>
       <p class="note">列の対応付け（自動で推測していますが、違っていれば選び直してください）</p>
+      <p class="note">団体・個人どちらの列も対応付けておくと、入っている方を自動で使います。</p>
       <div class="form-grid">
-        <label>寄付者名の列
-          <select id="map_name"></select>
+        <label>団体名（取引先名）の列
+          <select id="map_org_name"></select>
         </label>
-        <label>寄付者住所の列
-          <select id="map_addr"></select>
+        <label>個人名（氏名）の列
+          <select id="map_personal_name"></select>
+        </label>
+        <label>団体寄付者住所の列
+          <select id="map_org_addr"></select>
+        </label>
+        <label>個人寄付者住所の列
+          <select id="map_personal_addr"></select>
         </label>
         <label>事業名の列
           <select id="map_project"></select>
         </label>
-        <label>寄付日の列
+        <label>入金日の列
           <select id="map_date"></select>
         </label>
         <label>寄付金額の列
@@ -230,7 +237,7 @@ body{
       <p class="cert-received">上記の金額を受領いたしました。</p>
       <table class="cert-table">
         <thead>
-          <tr><th>事業名</th><th>寄付日</th><th>寄付金額</th></tr>
+          <tr><th>事業名</th><th>入金日</th><th>寄付金額</th></tr>
         </thead>
         <tbody>
           <tr>
@@ -365,7 +372,7 @@ function renderAmountHistory(){
   datalist.innerHTML = history.map(n => `<option value="${n}"></option>`).join('');
 }
 
-/* 初期値セット：寄付日は今日の日付、事業名は前回使用したもの、金額は10,000円を初期表示 */
+/* 初期値セット：入金日は今日の日付、事業名は前回使用したもの、金額は10,000円を初期表示 */
 document.getElementById('s_date').value = todayStr();
 document.getElementById('s_amount').value = 10000;
 renderProjectHistory();
@@ -419,7 +426,7 @@ async function certificateToPdfPage(pdf, isFirst){
 document.getElementById('btn_pdf_single').addEventListener('click', async () => {
   const data0 = collectSingleData();
   if(!data0.date){
-    alert('寄付日が未入力です。入力してから発行してください。');
+    alert('入金日が未入力です。入力してから発行してください。');
     return;
   }
   const btn = document.getElementById('btn_pdf_single');
@@ -441,7 +448,7 @@ document.getElementById('btn_pdf_single').addEventListener('click', async () => 
 
 /* ===================== Excelテンプレートダウンロード ===================== */
 document.getElementById('btn_template').addEventListener('click', () => {
-  const headers = ['寄付者名','寄付者住所','事業名','寄付日','寄付金額'];
+  const headers = ['寄付者名','寄付者住所','事業名','入金日','寄付金額'];
   const sample = ['東近江市役所　課長会','滋賀県東近江市八日市緑町10番5号','聖徳まつり2026','2026-06-19',10000];
   const ws = XLSX.utils.aoa_to_sheet([headers, sample]);
   ws['!cols'] = headers.map(() => ({wch: 20}));
@@ -466,15 +473,35 @@ function excelDateToISO(val){
   return s;
 }
 
+/* "JPY 10,000" のように通貨コードが付いた金額から数値だけを取り出す */
+function parseAmountValue(val){
+  if(typeof val === 'number') return val;
+  const cleaned = String(val ?? '').replace(/JPY/gi, '').replace(/[,¥￥\s]/g, '').trim();
+  const num = Number(cleaned);
+  return isNaN(num) ? 0 : num;
+}
+
 /* 列見出しのゆらぎ（前後の空白・全角/半角スペースなど）を吸収して一致度を判定 */
 function normalizeHeader(s){
   return String(s).replace(/[\s　]/g, '');
 }
+/* 同じ見出し名の列が複数あると、SheetJSが「取引先名_1」のように
+   自動で末尾に連番を付けて区別する。その連番を取り除いた形でも比較する。 */
+function stripDupSuffix(s){
+  return String(s).replace(/_\d+$/, '');
+}
 function guessColumn(headers, ...candidates){
+  // 1) 完全一致
   for(const c of candidates){
     const found = headers.find(h => normalizeHeader(h) === normalizeHeader(c));
     if(found !== undefined) return found;
   }
+  // 2) 連番サフィックス（_1, _2 など）を除いた完全一致
+  for(const c of candidates){
+    const found = headers.find(h => normalizeHeader(stripDupSuffix(h)) === normalizeHeader(c));
+    if(found !== undefined) return found;
+  }
+  // ※前方一致（例:「氏名」→「氏名公開可」）は誤検出の原因になるため使用しない
   return '';
 }
 
@@ -483,10 +510,12 @@ let excelHeaders = [];
 let currentWorksheet = null;
 
 const MAP_FIELDS = [
-  { id: 'map_name', candidates: ['寄付者名', '氏名', '寄付者'] },
-  { id: 'map_addr', candidates: ['寄付者住所', '住所'] },
-  { id: 'map_project', candidates: ['事業名', 'プロジェクト名', '案件名'] },
-  { id: 'map_date', candidates: ['寄付日', '領収日', '受領日'] },
+  { id: 'map_org_name', candidates: ['団体名: 取引先名', '取引先名', '団体名', '会社名', '法人名'] },
+  { id: 'map_personal_name', candidates: ['個人名: 氏名', '氏名', '個人名', 'お名前', '寄付者名'] },
+  { id: 'map_org_addr', candidates: ['取引先住所', '団体寄付者住所', '団体住所', '会社住所'] },
+  { id: 'map_personal_addr', candidates: ['個人寄付者住所', '個人住所', '住所', '寄付者住所'] },
+  { id: 'map_project', candidates: ['事業: 事業名', '事業', '事業名', 'プロジェクト名', '案件名'] },
+  { id: 'map_date', candidates: ['入金日', '領収日', '寄付日', '受領日'] },
   { id: 'map_amount', candidates: ['寄付金額', '金額'] }
 ];
 
@@ -555,24 +584,32 @@ document.getElementById('header_row_select').addEventListener('change', (e) => {
 });
 
 document.getElementById('btn_apply_mapping').addEventListener('click', () => {
-  const colName = document.getElementById('map_name').value;
-  const colAddr = document.getElementById('map_addr').value;
+  const colOrgName = document.getElementById('map_org_name').value;
+  const colPersonalName = document.getElementById('map_personal_name').value;
+  const colOrgAddr = document.getElementById('map_org_addr').value;
+  const colPersonalAddr = document.getElementById('map_personal_addr').value;
   const colProject = document.getElementById('map_project').value;
   const colDate = document.getElementById('map_date').value;
   const colAmount = document.getElementById('map_amount').value;
 
-  if(!colName || !colDate || !colAmount){
-    alert('寄付者名・寄付日・寄付金額は必ず列を選択してください。');
+  if((!colOrgName && !colPersonalName) || !colDate || !colAmount){
+    alert('団体名・個人名のいずれか、および入金日・寄付金額は必ず列を選択してください。');
     return;
   }
 
-  bulkRows = rawExcelRows.map(r => ({
-    name: String(r[colName] ?? '').trim(),
-    addr: colAddr ? String(r[colAddr] ?? '').trim() : '',
-    project: colProject ? String(r[colProject] ?? '').trim() : '',
-    date: excelDateToISO(r[colDate]),
-    amount: r[colAmount] || 0
-  }));
+  bulkRows = rawExcelRows.map(r => {
+    const personalName = colPersonalName ? String(r[colPersonalName] ?? '').trim() : '';
+    const orgName = colOrgName ? String(r[colOrgName] ?? '').trim() : '';
+    const personalAddr = colPersonalAddr ? String(r[colPersonalAddr] ?? '').trim() : '';
+    const orgAddr = colOrgAddr ? String(r[colOrgAddr] ?? '').trim() : '';
+    return {
+      name: personalName || orgName,
+      addr: personalAddr || orgAddr,
+      project: colProject ? String(r[colProject] ?? '').trim() : '',
+      date: excelDateToISO(r[colDate]),
+      amount: parseAmountValue(r[colAmount])
+    };
+  });
 
   renderBulkTable();
   document.getElementById('btn_pdf_bulk').disabled = bulkRows.length === 0;
@@ -583,7 +620,7 @@ document.getElementById('btn_apply_mapping').addEventListener('click', () => {
 function renderBulkTable(){
   const wrap = document.getElementById('bulk_table_wrap');
   if(bulkRows.length === 0){ wrap.innerHTML = ''; return; }
-  let html = '<table><thead><tr><th>寄付者名</th><th>寄付者住所</th><th>事業名</th><th>寄付日</th><th>寄付金額</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>寄付者名</th><th>寄付者住所</th><th>事業名</th><th>入金日</th><th>寄付金額</th></tr></thead><tbody>';
   bulkRows.forEach(r => {
     html += `<tr><td>${r.name}</td><td>${r.addr}</td><td>${r.project}</td><td>${r.date}</td><td>${formatYen(r.amount)}</td></tr>`;
   });
